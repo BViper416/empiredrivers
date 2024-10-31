@@ -19,6 +19,11 @@ from flask_wtf import FlaskForm
 from wtforms import SelectField, SubmitField, DateField
 from wtforms.validators import DataRequired
 import psycopg2
+from flask import Flask, render_template, request, redirect, url_for, flash,jsonify
+from pymongo import MongoClient
+import pandas as pd
+from datetime import datetime
+import os
 
 
 app = Flask(__name__)
@@ -28,78 +33,62 @@ app.secret_key = 'supersecretkey'
 UPLOAD_FOLDER = 'uploads'
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-DB_SETTINGS = {
-    'dbname': 'empire_drivers',
-    'user': 'empire_drivers_user',
-    'password': 'ZnNWzzRwrZrKBdQsS8NE9MLDIvGYXS21',
-    'host': 'dpg-cscg9pl6l47c73e0qkcg-a',
-    'port': '5432'
-}
-
 from sqlalchemy import create_engine
 
 # Create an SQLAlchemy engine using the connection settings
-DB_URL = f"postgresql+psycopg2://{DB_SETTINGS['user']}:{DB_SETTINGS['password']}@{DB_SETTINGS['host']}:{DB_SETTINGS['port']}/{DB_SETTINGS['dbname']}"
-engine = create_engine(DB_URL)
+MONGODB_URI = "mongodb+srv://yuktidemo:8XzMA9assqJXrlzc@empiredrivers.blmpb.mongodb.net/"  # Replace with your MongoDB URI
+client = MongoClient(MONGODB_URI)
+db = client['EmpireDriver']  # Database name
+trip_data_collection = db['Empire']  # Collection name for trip data
 
-# Global variable to hold the DataFrame
+# File path for uploaded Excel files
+UPLOAD_FOLDER = 'uploads'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# Global DataFrame to hold uploaded data
 df_global = None
 
 
 def clean_and_import_data(df):
-    # Connect to PostgreSQL
-    conn = psycopg2.connect(**DB_SETTINGS)
-    cursor = conn.cursor()
-
     # Strip column names to remove leading/trailing spaces
     df.columns = df.columns.str.strip()
 
     # Clean the date column by converting to datetime and handling invalid dates
-    df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')  # Convert to datetime, set invalid to NaT
+    df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')
+    df = df.dropna(subset=['DATE'])  # Drop rows with invalid dates
 
-    # Ensure trip_code is treated as a string
-    df['TRIP CODE'] = df['TRIP CODE'].astype(str)
+    # Convert relevant columns to the correct data types
+    df['GROSS PAY'] = df['GROSS PAY'].replace({'\$': ''}, regex=True).astype(float)
+    df['NET PAY'] = df['GROSS PAY'] * 0.75
 
-    # Drop rows where 'DATE' is NaT (not a valid date)
-    df = df.dropna(subset=['DATE'])
+    # Convert the DataFrame to a list of dictionaries for MongoDB insertion
+    data = df.to_dict(orient='records')
 
-    # Convert date to string format (YYYY-MM-DD) before inserting into the database
-    df.loc[:, 'DATE'] = df['DATE'].dt.strftime('%Y-%m-%d')
-
-
-    # Clean 'GROSS PAY' column by removing dollar signs and converting to float using .loc
-    df.loc[:, 'GROSS PAY'] = df['GROSS PAY'].replace({'\$': ''}, regex=True).astype(float)
-
-    # Calculate 'NET PAY' as 75% of 'GROSS PAY' using .loc
-    df.loc[:, 'NET PAY'] = df['GROSS PAY'] * 0.75
-
-
-    # Insert the cleaned data into PostgreSQL
-    for index, row in df.iterrows():
-
-        # Check if a record already exists with the same batch_id, driver_name, trip_date, and trip_code
-        cursor.execute("""
-            SELECT 1 FROM trip_data 
-            WHERE batch_id = %s AND driver_name = %s AND trip_date = %s AND trip_code = %s
-        """, (row['BATCH ID'], row['DRIVER NAME'], row['DATE'], row['TRIP CODE']))
-
-        # If no record exists, insert new row
-        if cursor.fetchone() is None:
-
-            cursor.execute("""
-                INSERT INTO trip_data (batch_id, sp_company, driver_name, drive_code, trip_date, trip_code, trip_name, cancellation_reason, miles, gross_pay, deduction, spiff, net_pay)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                row['BATCH ID'], row['SP COMPANY'], row['DRIVER NAME'], row['DRIVE CODE'],
-                row['DATE'], row['TRIP CODE'], row['TRIP NAME'], row['CANCELLATION REASON'],
-                row['MILES'], row['GROSS PAY'], row.get('DEDUCTION', 0), row.get('SPIFF', 0), row['NET PAY']
-            ))
-
-
-    conn.commit()
-    cursor.close()
-    conn.close()
-
+    # Insert data into MongoDB Atlas
+    for row in data:
+        # Check if a record already exists with the same details to avoid duplicates
+        if not trip_data_collection.find_one({
+            "batch_id": row['BATCH ID'],
+            "driver_name": row['DRIVER NAME'],
+            "trip_date": row['DATE'],
+            "trip_code": row['TRIP CODE']
+        }):
+            # Insert into MongoDB
+            trip_data_collection.insert_one({
+                "batch_id": row['BATCH ID'],
+                "sp_company": row['SP COMPANY'],
+                "driver_name": row['DRIVER NAME'],
+                "drive_code": row['DRIVE CODE'],
+                "trip_date": row['DATE'],
+                "trip_code": row['TRIP CODE'],
+                "trip_name": row['TRIP NAME'],
+                "cancellation_reason": row.get('CANCELLATION REASON'),
+                "miles": row['MILES'],
+                "gross_pay": row['GROSS PAY'],
+                "deduction": row.get('DEDUCTION', 0),
+                "spiff": row.get('SPIFF', 0),
+                "net_pay": row['NET PAY']
+            })
 
 @app.route('/')
 def home():
@@ -111,38 +100,26 @@ def home():
 def upload_file():
     global df_global
     if request.method == 'POST':
-        if 'file' not in request.files:
-            flash('No file part')
-            return redirect(request.url)
-        
-        file = request.files['file']
-        
-        if file.filename == '':
-            flash('No selected file')
-            return redirect(request.url)
-        
+        file = request.files.get('file')
         if file and file.filename.endswith('.xlsx'):
+            file_path = os.path.join(UPLOAD_FOLDER, file.filename)
+            file.save(file_path)
             try:
-                filename = secure_filename(file.filename)
-                file_path = os.path.join(app.root_path, 'uploads', filename)
-                file.save(file_path)
-                
                 # Process the uploaded Excel file
                 df_global = pd.read_excel(file_path)
                 
-                if df_global is None or df_global.empty:
+                if df_global.empty:
                     flash('Failed to read the uploaded file or the file is empty.')
                     return redirect(request.url)
                 
-                # Automatically clean and insert into PostgreSQL
+                # Automatically clean and insert into MongoDB
                 clean_and_import_data(df_global)
+                return jsonify({"message": "File uploaded successfully", "Filename": "test"}), 200
 
-                # Now query all the data in the database
-                #conn = psycopg2.connect(**DB_SETTINGS)
-                query = "SELECT * FROM trip_data"
-                df_global = pd.read_sql(query, engine)
-                #conn.close()
-                
+                # Query all the data in MongoDB
+                data = list(trip_data_collection.find())
+                df_global = pd.DataFrame(data)
+
                 # Get unique driver names for the dropdown
                 driver_names = df_global['driver_name'].unique().tolist()
 
@@ -151,9 +128,6 @@ def upload_file():
             except Exception as e:
                 flash(f"Error uploading file: {str(e)}")
                 return redirect(request.url)
-        else:
-            flash('Invalid file format. Only .xlsx files are allowed.')
-            return redirect(request.url)
     
     return render_template('upload.html')
 
@@ -162,67 +136,46 @@ def upload_file():
 def filter_rides():
     global df_global
 
-    # Query all data from the database for filtering
-    #conn = psycopg2.connect(**DB_SETTINGS)
-    query = "SELECT * FROM trip_data"
-    df_global = pd.read_sql(query, engine)
+    # Query all data from MongoDB
+    data = list(trip_data_collection.find())
+    df_global = pd.DataFrame(data)
 
-    # Ensure the column names are standardized to lowercase and underscores
-    df_global.columns = df_global.columns.str.strip().str.lower().str.replace(' ', '_')
-
-    #conn.close()
-    
     if request.method == 'POST':
         driver_name = request.form.get('driver_name')
         date_from = request.form.get('date_from')
         date_to = request.form.get('date_to')
 
-        # Convert the date strings to datetime objects
-        date_from = datetime.strptime(date_from, '%Y-%m-%d').date()
-        date_to = datetime.strptime(date_to, '%Y-%m-%d').date()
+        date_from = datetime.strptime(date_from, '%Y-%m-%d')
+        date_to = datetime.strptime(date_to, '%Y-%m-%d')
 
-        # Filter the DataFrame based on the driver's name and date range
-        filtered_df = df_global[
-            (df_global['driver_name'] == driver_name) & 
-            (pd.to_datetime(df_global['trip_date']).dt.date >= date_from) & 
-            (pd.to_datetime(df_global['trip_date']).dt.date <= date_to)
-        ].copy()
+        # Query MongoDB for filtered data
+        filtered_data = list(trip_data_collection.find({
+            'driver_name': driver_name,
+            'trip_date': {'$gte': date_from, '$lte': date_to}
+        }))
+        filtered_df = pd.DataFrame(filtered_data)
 
-        # Select specific columns to display and calculate net pay (75% of gross pay)
-        #columns = ['BATCH ID', 'SP COMPANY', 'DRIVER NAME', 'DATE', 'TRIP NAME', 'MILES', 'GROSS PAY']
-        #filtered_df = filtered_df[columns]
-        filtered_df.loc[:, 'net_pay'] = filtered_df['gross_pay'] * 0.75
+        if not filtered_df.empty:
+            filtered_df['net_pay'] = filtered_df['gross_pay'] * 0.75
+            grouped_df = filtered_df.groupby('trip_date').agg({
+                'trip_name': 'count',
+                'miles': 'sum',
+                'gross_pay': 'sum',
+                'net_pay': 'sum'
+            }).reset_index().rename(columns={'trip_name': 'runs'})
 
-        # Format the date to show only 'YYYY-MM-DD' without time
-        filtered_df.loc[:, 'trip_date'] = pd.to_datetime(filtered_df['trip_date']).dt.strftime('%Y-%m-%d')
+            # Calculate totals
+            total_miles = grouped_df['miles'].sum()
+            total_gross_pay = grouped_df['gross_pay'].sum()
+            total_net_pay = grouped_df['net_pay'].sum()
+            total_runs = grouped_df['runs'].sum()
+            days = grouped_df['trip_date'].nunique()
 
-        # Group by 'DATE' and aggregate the required columns
-        grouped_df = filtered_df.groupby('trip_date').agg({
-            'trip_name': 'count',     # Number of runs (rides)
-            'miles': 'sum',           # Total miles
-            'gross_pay': 'sum',       # Total gross pay
-            'net_pay': 'sum'          # Total net pay
-        }).reset_index()
-
-        # Rename the 'TRIP NAME' column to 'RUNS' to indicate the number of rides
-        grouped_df = grouped_df.rename(columns={'trip_name': 'runs'})
-
-        # Calculate totals for miles, gross pay, and net pay
-        total_miles = grouped_df['miles'].sum()
-        total_gross_pay = grouped_df['gross_pay'].sum()
-        total_net_pay = grouped_df['net_pay'].sum()
-
-        # Calculate the number of unique days and the number of runs (rides)
-        days = filtered_df['trip_date'].nunique()  # Unique number of dates
-        total_runs = grouped_df['runs'].sum()  # Total number of rides
-
-        # Convert the grouped DataFrame to a list of dictionaries to pass into the template
-        data = grouped_df.to_dict(orient='records')
-
-        # Pass the required variables into the template
-        return render_template('display.html', data=data, 
-                               total_miles=total_miles, total_gross_pay=total_gross_pay, total_net_pay=total_net_pay,
-                               driver_name=driver_name, date_from=date_from, date_to=date_to, days=days, run=total_runs)
+            data = grouped_df.to_dict(orient='records')
+            return render_template('display.html', data=data, total_miles=total_miles,
+                                   total_gross_pay=total_gross_pay, total_net_pay=total_net_pay,
+                                   driver_name=driver_name, date_from=date_from, date_to=date_to,
+                                   days=days, run=total_runs)
     
     driver_names = df_global['driver_name'].unique()
     return render_template('filter.html', driver_names=driver_names)
