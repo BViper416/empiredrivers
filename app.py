@@ -116,7 +116,7 @@ def upload_file():
                 
                 # Automatically clean and insert into MongoDB
                 clean_and_import_data(df_global)
-                return jsonify({"message": "File uploaded successfully", "Filename": "test"}), 200
+                #return jsonify({"message": "File uploaded successfully", "Filename": "test"}), 200
 
                 # Query all the data in MongoDB
                 data = list(trip_data_collection.find())
