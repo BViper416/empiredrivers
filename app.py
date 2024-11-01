@@ -57,9 +57,11 @@ def clean_and_import_data(df):
     df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')
     df = df.dropna(subset=['DATE'])  # Drop rows with invalid dates
 
-    # Convert relevant columns to the correct data types
-    df['GROSS PAY'] = df['GROSS PAY'].replace({'\$': ''}, regex=True).astype(float)
-    df['NET PAY'] = df['GROSS PAY'] * 0.75
+  # Step 1: Remove the dollar sign and convert 'GROSS PAY' to a float
+    df.loc[:, 'GROSS PAY'] = df['GROSS PAY'].replace({'\$': ''}, regex=True).astype(float)
+
+    # Step 2: Calculate 'NET PAY' as 75% of 'GROSS PAY'
+    df.loc[:, 'NET PAY'] = df['GROSS PAY'] * 0.75
 
     # Convert the DataFrame to a list of dictionaries for MongoDB insertion
     data = df.to_dict(orient='records')
