@@ -24,13 +24,13 @@ from pymongo import MongoClient
 import pandas as pd
 from datetime import datetime
 import os
-port = int(os.environ.get("PORT", 10000))
-app.run(host="0.0.0.0", port=port)
 
 
 
 app = Flask(__name__)
 app.secret_key = 'supersecretkey'
+port = int(os.environ.get("PORT", 10000))
+app.run(host="0.0.0.0", port=port)
 
 # Directory for saving uploaded files
 UPLOAD_FOLDER = 'uploads'
