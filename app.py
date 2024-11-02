@@ -57,11 +57,9 @@ def clean_and_import_data(df):
     df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')
     df = df.dropna(subset=['DATE'])  # Drop rows with invalid dates
 
-  # Step 1: Remove the dollar sign and convert 'GROSS PAY' to a float
-    df.loc[:, 'GROSS PAY'] = df['GROSS PAY'].replace({'\$': ''}, regex=True).astype(float)
-
-    # Step 2: Calculate 'NET PAY' as 75% of 'GROSS PAY'
-    df.loc[:, 'NET PAY'] = df['GROSS PAY'] * 0.75
+    # Convert relevant columns to the correct data types
+    df['GROSS PAY'] = df['GROSS PAY'].replace({'\$': ''}, regex=True).astype(float)
+    df['NET PAY'] = df['GROSS PAY'] * 0.75
 
     # Convert the DataFrame to a list of dictionaries for MongoDB insertion
     data = df.to_dict(orient='records')
@@ -122,10 +120,15 @@ def upload_file():
                 data = list(trip_data_collection.find())
                 df_global = pd.DataFrame(data)
 
-                # Get unique driver names for the dropdown
-                driver_names = df_global['driver_name'].unique().tolist()
+                # Ensure that 'driver_name' field is present in MongoDB and retrieve unique values
+                if 'driver_name' in df_global.columns:
+                    driver_names = df_global['driver_name'].unique().tolist()
+                else:
+                    flash('Driver names not found in the uploaded data.')
+                    return redirect(request.url)
 
                 flash('File uploaded and processed successfully')
+                # Redirect to filter page after processing
                 return render_template('filter.html', driver_names=driver_names)
             except Exception as e:
                 flash(f"Error uploading file: {str(e)}")
@@ -142,45 +145,70 @@ def filter_rides():
     data = list(trip_data_collection.find())
     df_global = pd.DataFrame(data)
 
+    # Ensure the column names are standardized to lowercase and underscores
+    df_global.columns = df_global.columns.str.strip().str.lower().str.replace(' ', '_')
+
     if request.method == 'POST':
         driver_name = request.form.get('driver_name')
         date_from = request.form.get('date_from')
         date_to = request.form.get('date_to')
 
-        date_from = datetime.strptime(date_from, '%Y-%m-%d')
-        date_to = datetime.strptime(date_to, '%Y-%m-%d')
+        # Convert date_from and date_to strings to datetime.date objects
+        date_from = datetime.strptime(date_from, '%Y-%m-%d').date()
+        date_to = datetime.strptime(date_to, '%Y-%m-%d').date()
 
-        # Query MongoDB for filtered data
-        filtered_data = list(trip_data_collection.find({
-            'driver_name': driver_name,
-            'trip_date': {'$gte': date_from, '$lte': date_to}
-        }))
-        filtered_df = pd.DataFrame(filtered_data)
+        # Ensure 'trip_date' is in datetime format and convert it to date type
+        df_global['trip_date'] = pd.to_datetime(df_global['trip_date']).dt.date
 
-        if not filtered_df.empty:
-            filtered_df['net_pay'] = filtered_df['gross_pay'] * 0.75
-            grouped_df = filtered_df.groupby('trip_date').agg({
-                'trip_name': 'count',
-                'miles': 'sum',
-                'gross_pay': 'sum',
-                'net_pay': 'sum'
-            }).reset_index().rename(columns={'trip_name': 'runs'})
+        # Filter the DataFrame based on the driver's name and date range
+        filtered_df = df_global[
+            (df_global['driver_name'] == driver_name) & 
+            (df_global['trip_date'] >= date_from) & 
+            (df_global['trip_date'] <= date_to)
+        ].copy()
 
-            # Calculate totals
-            total_miles = grouped_df['miles'].sum()
-            total_gross_pay = grouped_df['gross_pay'].sum()
-            total_net_pay = grouped_df['net_pay'].sum()
-            total_runs = grouped_df['runs'].sum()
-            days = grouped_df['trip_date'].nunique()
+        if filtered_df.empty:
+            flash('No data found for the selected filters.')
+            return redirect(request.url)
 
-            data = grouped_df.to_dict(orient='records')
-            return render_template('display.html', data=data, total_miles=total_miles,
-                                   total_gross_pay=total_gross_pay, total_net_pay=total_net_pay,
-                                   driver_name=driver_name, date_from=date_from, date_to=date_to,
-                                   days=days, run=total_runs)
+        filtered_df.loc[:, 'net_pay'] = filtered_df['gross_pay'] * 0.75
+
+        # Convert 'trip_date' to string format for output
+        filtered_df['trip_date'] = filtered_df['trip_date'].apply(lambda x: x.strftime('%Y-%m-%d'))
+
+        # Group by 'trip_date' and aggregate the required columns
+        grouped_df = filtered_df.groupby('trip_date').agg({
+            'trip_name': 'count',     # Number of runs (rides)
+            'miles': 'sum',           # Total miles
+            'gross_pay': 'sum',       # Total gross pay
+            'net_pay': 'sum'          # Total net pay
+        }).reset_index()
+
+        # Rename the 'trip_name' column to 'runs' to indicate the number of rides
+        grouped_df = grouped_df.rename(columns={'trip_name': 'runs'})
+
+        # Calculate totals for miles, gross pay, and net pay
+        total_miles = grouped_df['miles'].sum()
+        total_gross_pay = grouped_df['gross_pay'].sum()
+        total_net_pay = grouped_df['net_pay'].sum()
+
+        # Calculate the number of unique days and the number of runs (rides)
+        days = filtered_df['trip_date'].nunique()  # Unique number of dates
+        total_runs = grouped_df['runs'].sum()  # Total number of rides
+
+        # Convert the grouped DataFrame to a list of dictionaries to pass into the template
+        data = grouped_df.to_dict(orient='records')
+
+        # Pass the required variables into the template
+        return render_template('display.html', data=data, 
+                               total_miles=total_miles, total_gross_pay=total_gross_pay, total_net_pay=total_net_pay,
+                               driver_name=driver_name, date_from=date_from, date_to=date_to, days=days, run=total_runs)
     
     driver_names = df_global['driver_name'].unique()
     return render_template('filter.html', driver_names=driver_names)
+
+
+
 
 
 
@@ -208,6 +236,7 @@ def generate_pdf(driver_name, date_from, date_to):
     date_from = request.form.get('date_from')
     date_to = request.form.get('date_to')
     # Filter the data for the selected driver and date range
+    # Filter the data for the selected driver and date range
     filtered_df = df_global[
         (df_global['driver_name'] == driver_name) &
         (pd.to_datetime(df_global['trip_date']).dt.date >= datetime.strptime(date_from, '%Y-%m-%d').date()) &
@@ -217,6 +246,8 @@ def generate_pdf(driver_name, date_from, date_to):
     if filtered_df.empty:
         return None, f'No rides found for {driver_name} between {date_from} and {date_to}'
 
+    # Convert 'trip_date' to string format for display and PDF output
+    filtered_df['trip_date'] = filtered_df['trip_date'].apply(lambda x: x.strftime('%Y-%m-%d'))
     # Process the data similar to what is displayed in the HTML version
     filtered_df = filtered_df[['trip_date', 'trip_name', 'miles', 'gross_pay']]
     filtered_df.loc[:, 'net_pay'] = filtered_df['gross_pay'] * 0.75
