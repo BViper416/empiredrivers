@@ -21,11 +21,24 @@ from wtforms.validators import DataRequired
 import psycopg2
 from flask import Flask, render_template, request, redirect, url_for, flash,jsonify
 from pymongo import MongoClient
-import pandas as pd
-from datetime import datetime
-import os
-
-
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import Table, TableStyle
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import Table, TableStyle
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Image  # Added Image
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.platypus import Spacer
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
 
 app = Flask(__name__)
 app.secret_key = 'supersecretkey'
@@ -99,7 +112,7 @@ def home():
 # Route to upload and process the Excel file
 @app.route('/upload', methods=['GET', 'POST'])
 def upload_file():
-    global df_global
+    #global df_global
     if request.method == 'POST':
         file = request.files.get('file')
         if file and file.filename.endswith('.xlsx'):
@@ -130,7 +143,8 @@ def upload_file():
 
                 flash('File uploaded and processed successfully')
                 # Redirect to filter page after processing
-                return render_template('filter.html', driver_names=driver_names)
+                #return render_template('filter.html', driver_names=driver_names)
+                return redirect(url_for('filter_rides'))
             except Exception as e:
                 flash(f"Error uploading file: {str(e)}")
                 return redirect(request.url)
@@ -140,7 +154,7 @@ def upload_file():
 
 @app.route('/filter', methods=['GET', 'POST'])
 def filter_rides():
-    global df_global
+    #global df_global
 
     # Query all data from MongoDB
     data = list(trip_data_collection.find())
@@ -204,44 +218,39 @@ def filter_rides():
         return render_template('display.html', data=data, 
                                total_miles=total_miles, total_gross_pay=total_gross_pay, total_net_pay=total_net_pay,
                                driver_name=driver_name, date_from=date_from, date_to=date_to, days=days, run=total_runs)
+    else:
+        # For GET request, retrieve driver names and render filter.html
+        if 'driver_name' in df_global.columns:
+            driver_names = df_global['driver_name'].unique().tolist()
+        else:
+            flash('No driver names found in the database.')
+            return redirect(url_for('upload_file'))
+
     
-    driver_names = df_global['driver_name'].unique()
+    #driver_names = df_global['driver_name'].unique()
     return render_template('filter.html', driver_names=driver_names)
 
-
-
-
-
-
-
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import Table, TableStyle
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import Table, TableStyle
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Image  # Added Image
-from reportlab.lib import colors
-from reportlab.lib.units import inch
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.lib.styles import ParagraphStyle
-
-from reportlab.platypus import Spacer
-
-
 def generate_pdf(driver_name, date_from, date_to):
-    global df_global
-    driver_name = request.form.get('driver_name')
-    date_from = request.form.get('date_from')
-    date_to = request.form.get('date_to')
+    #global df_global
+    data = list(trip_data_collection.find())
+    df_global = pd.DataFrame(data)
+
+    #driver_name = request.form.get('driver_name')
+    #date_from = request.form.get('date_from')
+    #date_to = request.form.get('date_to')
+
+    # Ensure the column names are standardized
+    df_global.columns = df_global.columns.str.strip().str.lower().str.replace(' ', '_')
+
+    # Ensure 'trip_date' is in datetime format
+    df_global['trip_date'] = pd.to_datetime(df_global['trip_date'])
+    # Filter the data for the selected driver and date range
     # Filter the data for the selected driver and date range
     # Filter the data for the selected driver and date range
     filtered_df = df_global[
         (df_global['driver_name'] == driver_name) &
-        (pd.to_datetime(df_global['trip_date']).dt.date >= datetime.strptime(date_from, '%Y-%m-%d').date()) &
-        (pd.to_datetime(df_global['trip_date']).dt.date <= datetime.strptime(date_to, '%Y-%m-%d').date())
+        (df_global['trip_date'] >= datetime.strptime(date_from, '%Y-%m-%d')) &
+        (df_global['trip_date'] <= datetime.strptime(date_to, '%Y-%m-%d'))
     ].copy()
 
     if filtered_df.empty:
@@ -392,10 +401,7 @@ def download_pdf():
     pdf_filename = f'{driver_name.replace(" ", "_")}_{formatted_date_from}_to_{formatted_date_to}_payslip.pdf'
     return send_file(buffer, as_attachment=True, download_name=pdf_filename, mimetype='application/pdf')
 
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.application import MIMEApplication
+
 
 @app.route('/send_email', methods=['POST'])
 def send_email():
@@ -440,12 +446,6 @@ def send_email():
     return redirect(url_for('filter_rides'))
 
 
-
-
-
-
-from datetime import datetime
-
 @app.template_filter('format_date')
 def format_date(value, format='%m-%d-%Y'):
     """Format a date passed as a string."""
@@ -456,4 +456,4 @@ def format_date(value, format='%m-%d-%Y'):
 if __name__ == '__main__':
     if not os.path.exists(UPLOAD_FOLDER):
         os.makedirs(UPLOAD_FOLDER)
-    app.run(debug=True)
+    app.run(debug=False)
